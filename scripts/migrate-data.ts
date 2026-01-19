@@ -7,7 +7,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import * as fs from 'fs';
 
 const prisma = new PrismaClient();
-const BACKUP_FILE = '/home/ubuntu/rag_islamique/backup_data.json';
+const BACKUP_FILE = './backup_data.json';
 const BATCH_SIZE = 100;
 
 async function migrate() {
@@ -15,23 +15,23 @@ async function migrate() {
   console.log('  MIGRATION SUPABASE - ÉTAPE 1');
   console.log('  (Données sans embeddings)');
   console.log('========================================\n');
-  
+
   // Charger le backup
   console.log('📂 Chargement du backup...');
   const backupData = JSON.parse(fs.readFileSync(BACKUP_FILE, 'utf-8'));
   console.log(`  - DocumentChunks: ${backupData.documentChunks.length}`);
   console.log(`  - ChatSessions: ${backupData.chatSessions.length}`);
-  
+
   // Migrer les DocumentChunks
   console.log('\n📦 Migration des DocumentChunks...');
-  
+
   const chunks = backupData.documentChunks;
   let migrated = 0;
   let errors = 0;
-  
+
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
     const batch = chunks.slice(i, i + BATCH_SIZE);
-    
+
     try {
       for (const chunk of batch) {
         await prisma.$executeRawUnsafe(`
@@ -57,28 +57,28 @@ async function migrate() {
         );
         migrated++;
       }
-      
+
       console.log(`  ✓ Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(chunks.length / BATCH_SIZE)} - ${migrated} documents`);
-      
+
     } catch (error: any) {
       console.error(`  ✗ Erreur batch ${Math.floor(i / BATCH_SIZE) + 1}:`, error.message);
       errors += batch.length;
     }
   }
-  
+
   console.log(`\n✅ DocumentChunks migrés: ${migrated}`);
   if (errors > 0) console.log(`⚠️  Erreurs: ${errors}`);
-  
+
   // Migrer les ChatSessions
   console.log('\n💬 Migration des ChatSessions...');
   let sessionsMigrated = 0;
-  
+
   for (const session of backupData.chatSessions) {
     try {
       // Vérifier si la session existe déjà
       const existing = await prisma.chatSession.findUnique({ where: { id: session.id } });
       if (existing) continue;
-      
+
       await prisma.chatSession.create({
         data: {
           id: session.id,
@@ -116,7 +116,7 @@ async function migrate() {
     }
   }
   console.log(`✅ ChatSessions migrées: ${sessionsMigrated}`);
-  
+
   // Migrer les UsageQuotas
   console.log('\n📊 Migration des UsageQuotas...');
   for (const quota of backupData.usageQuotas || []) {
@@ -132,27 +132,27 @@ async function migrate() {
         },
         update: {}
       });
-    } catch (e) {}
+    } catch (e) { }
   }
   console.log(`✅ UsageQuotas migrés: ${backupData.usageQuotas?.length || 0}`);
-  
+
   // Vérifier les résultats
   console.log('\n========================================');
   console.log('  VÉRIFICATION FINALE');
   console.log('========================================');
-  
+
   const stats: any = await prisma.$queryRaw`
     SELECT 
       COUNT(*) as total,
       COUNT(embedding) as with_embeddings
     FROM document_chunks
   `;
-  
+
   console.log(`\n📊 Statistiques Supabase:`);
   console.log(`  - Documents totaux: ${stats[0].total}`);
   console.log(`  - Avec embeddings: ${stats[0].with_embeddings}`);
   console.log(`  - Sans embeddings: ${Number(stats[0].total) - Number(stats[0].with_embeddings)}`);
-  
+
   await prisma.$disconnect();
   console.log('\n✅ Migration Étape 1 terminée!\n');
   console.log('👉 Prochaine étape: Générer les embeddings avec HuggingFace');
