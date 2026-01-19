@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 async function main() {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || "";
     if (!apiKey) {
         console.error("❌ No GEMINI_API_KEY found in environment");
         return;

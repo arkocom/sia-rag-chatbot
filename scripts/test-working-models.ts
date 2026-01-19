@@ -10,7 +10,7 @@ const modelsToTest = [
 ];
 
 async function main() {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || "";
     if (!apiKey) {
         console.log("No API Key");
         return;

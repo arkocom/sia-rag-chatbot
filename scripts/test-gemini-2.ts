@@ -11,7 +11,7 @@ const modelsToTest = [
 ];
 
 async function main() {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || "";
     const genAI = new GoogleGenerativeAI(apiKey);
 
     console.log("Testing Specific Models:");
