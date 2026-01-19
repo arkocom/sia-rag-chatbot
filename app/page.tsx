@@ -90,7 +90,7 @@ export default function HomePage() {
 
   const submitEscalation = async () => {
     if (!sessionId || !escalationForm.reason.trim()) return
-    
+
     setEscalationLoading(true)
     try {
       const response = await fetch('/api/escalate', {
@@ -106,7 +106,7 @@ export default function HomePage() {
           preferred_contact: escalationForm.preferred_contact
         })
       })
-      
+
       if (response.ok) {
         setEscalationSuccess(true)
         setTimeout(() => {
@@ -147,9 +147,9 @@ export default function HomePage() {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           message: input,
-          session_id: sessionId 
+          session_id: sessionId
         }),
       })
 
@@ -188,7 +188,7 @@ export default function HomePage() {
               const parsed = JSON.parse(data)
               if (parsed?.status === 'completed' && parsed?.result) {
                 const result: ChatResponse = parsed.result
-                
+
                 // Mettre à jour le session ID et le compteur de tours
                 if (result.session_id) {
                   if (!sessionId) {
@@ -196,10 +196,10 @@ export default function HomePage() {
                   }
                   setTurnCount(prev => prev + 1)
                 }
-                
+
                 // Vérifier si escalade nécessaire
                 const needsEscalation = result.actions?.some(a => a.type === 'human_handoff')
-                
+
                 setMessages(prev => {
                   const updated = [...prev]
                   const lastMsg = updated[updated.length - 1]
@@ -383,9 +383,9 @@ export default function HomePage() {
                 className={`flex ${message?.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
                 <Card className={`max-w-[85%] p-4 ${message?.role === 'user'
-                    ? 'bg-teal-600 text-white border-teal-600'
-                    : 'bg-white border-gray-200 shadow-md'
-                }`}>
+                  ? 'bg-teal-600 text-white border-teal-600'
+                  : 'bg-white border-gray-200 shadow-md'
+                  }`}>
                   <div className="prose prose-sm max-w-none">
                     <p className="whitespace-pre-wrap m-0">{message?.content}</p>
                   </div>
@@ -398,14 +398,14 @@ export default function HomePage() {
                         <Sparkles className="w-3 h-3" />
                         Confiance: {Math.round(message.confidence * 100)}%
                       </span>
-                      
+
                       {/* Badge d'intention */}
                       {message.intent && (
                         <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200">
                           {INTENT_LABELS[message.intent] || message.intent}
                         </span>
                       )}
-                      
+
                       {/* Badge temps de traitement */}
                       {message.metadata?.processing_time_ms && (
                         <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-600 border border-blue-200">
@@ -446,20 +446,19 @@ export default function HomePage() {
                           <div key={source.id || idx} className="bg-amber-50 rounded p-2 text-xs">
                             <div className="flex items-center justify-between mb-1">
                               <p className="font-semibold text-teal-700">{source?.reference}</p>
-                              <span className={`px-1.5 py-0.5 rounded text-xs ${
-                                source.source_type === 'coran' ? 'bg-teal-100 text-teal-700' :
-                                source.source_type === 'hadith' ? 'bg-amber-100 text-amber-700' :
-                                'bg-emerald-100 text-emerald-700'
-                              }`}>
+                              <span className={`px-1.5 py-0.5 rounded text-xs ${source.source_type === 'coran' ? 'bg-teal-100 text-teal-700' :
+                                  source.source_type === 'hadith' ? 'bg-amber-100 text-amber-700' :
+                                    'bg-emerald-100 text-emerald-700'
+                                }`}>
                                 {source.source_type === 'coran' ? 'Coran' :
-                                 source.source_type === 'hadith' ? 'Hadith' : 'Imam'}
+                                  source.source_type === 'hadith' ? 'Hadith' : 'Imam'}
                               </span>
                             </div>
                             <p className="text-gray-600 italic">"{source?.snippet?.substring(0, 150)}..."</p>
                             <div className="mt-1 flex items-center gap-2">
                               <div className="flex-1 bg-gray-200 rounded-full h-1">
-                                <div 
-                                  className="bg-teal-500 h-1 rounded-full" 
+                                <div
+                                  className="bg-teal-500 h-1 rounded-full"
                                   style={{ width: `${source.score * 100}%` }}
                                 />
                               </div>
@@ -561,7 +560,7 @@ export default function HomePage() {
                       </button>
                     </div>
                   </div>
-                  
+
                   <div className="p-6 space-y-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Votre nom</label>
@@ -571,7 +570,7 @@ export default function HomePage() {
                         onChange={e => setEscalationForm(prev => ({ ...prev, name: e.target.value }))}
                       />
                     </div>
-                    
+
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
@@ -592,7 +591,7 @@ export default function HomePage() {
                         />
                       </div>
                     </div>
-                    
+
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Mode de contact préféré</label>
                       <div className="flex gap-4">
@@ -620,7 +619,7 @@ export default function HomePage() {
                         </label>
                       </div>
                     </div>
-                    
+
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Urgence</label>
                       <div className="flex gap-2">
@@ -629,20 +628,19 @@ export default function HomePage() {
                             key={level}
                             type="button"
                             onClick={() => setEscalationForm(prev => ({ ...prev, urgency: level }))}
-                            className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
-                              escalationForm.urgency === level
+                            className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${escalationForm.urgency === level
                                 ? level === 'low' ? 'bg-emerald-100 text-emerald-700 border-2 border-emerald-500'
                                   : level === 'medium' ? 'bg-amber-100 text-amber-700 border-2 border-amber-500'
-                                  : 'bg-red-100 text-red-700 border-2 border-red-500'
+                                    : 'bg-red-100 text-red-700 border-2 border-red-500'
                                 : 'bg-gray-100 text-gray-600 border-2 border-transparent'
-                            }`}
+                              }`}
                           >
                             {level === 'low' ? 'Faible' : level === 'medium' ? 'Moyenne' : 'Élevée'}
                           </button>
                         ))}
                       </div>
                     </div>
-                    
+
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
                         Décrivez votre demande <span className="text-red-500">*</span>
@@ -656,7 +654,7 @@ export default function HomePage() {
                       />
                     </div>
                   </div>
-                  
+
                   <div className="p-6 border-t border-gray-200 flex gap-3">
                     <Button
                       variant="outline"
@@ -682,32 +680,8 @@ export default function HomePage() {
       </AnimatePresence>
 
       {/* Footer - Ouvrages de référence */}
-      <footer className="bg-gray-900 text-white py-8 mt-32">
-        <div className="max-w-4xl mx-auto px-4">
-          <h3 className="text-lg font-semibold text-teal-400 mb-4 text-center">📚 Ouvrages de Référence</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
-            <div>
-              <h4 className="font-semibold text-amber-400 mb-2">Sources Primaires</h4>
-              <ul className="space-y-1 text-gray-300">
-                <li>• <strong>Le Noble Coran</strong> - Texte arabe intégral (6 236 versets)</li>
-                <li>• <strong>Hadiths du Prophète ﷺ</strong> - Traditions prophétiques authentiques</li>
-              </ul>
-            </div>
-            <div>
-              <h4 className="font-semibold text-amber-400 mb-2">Ouvrages des Imams</h4>
-              <ul className="space-y-1 text-gray-300">
-                <li>• <strong>Riyad as-Salihin</strong> - Imam An-Nawawi (النووي)</li>
-                <li>• <strong>Al-Adab al-Mufrad</strong> - Imam Al-Bukhari (البخاري)</li>
-                <li>• <strong>Ihya&apos; Ulum al-Din</strong> - Imam Al-Ghazali (الغزالي)</li>
-                <li>• <strong>La Risala</strong> - Imam Al-Qayrawani (القيرواني) - Fiqh Malékite</li>
-              </ul>
-            </div>
-          </div>
-          <div className="mt-6 pt-4 border-t border-gray-700 text-center text-xs text-gray-500">
-            <p>SIA - Sources Islamiques Authentiques | Version Alpha | API v1.0.0</p>
-            <p className="mt-1">En cours d&apos;essais et de validation par les institutions en vigueur</p>
-          </div>
-        </div>
+      <footer className="mt-auto py-6 text-center text-xs text-gray-400">
+        <p>Sources : Coran (arabe + traduction Rachid Maach) • Sahih Al-Boukhari • Riyad as-Salihin • Al-Ghazali • La Risala</p>
       </footer>
     </div>
   )
