@@ -1,13 +1,25 @@
 -- Migration: Full B2B SaaS schema
 -- Creates users, agents, saas_documents, chunks, conversations, messages
--- Run in Supabase SQL Editor: https://supabase.com/dashboard/project/<project-ref>/sql
+-- Run in Supabase SQL Editor
 --
--- Prerequisites:
---   - Supabase Auth enabled
---   - pgvector extension enabled
---
--- NOTE: This migration supersedes 0001_add_multitenancy.sql.
---       Run this one instead if starting fresh.
+-- This script drops and recreates the new tables (NOT document_chunks).
+
+-- ============================================================
+-- 0. Clean slate: drop new tables if they exist (reverse order)
+--    NOTE: document_chunks is NOT dropped (contains 6,372 real rows)
+-- ============================================================
+
+DROP TABLE IF EXISTS messages CASCADE;
+DROP TABLE IF EXISTS conversations CASCADE;
+DROP TABLE IF EXISTS chunks CASCADE;
+DROP TABLE IF EXISTS saas_documents CASCADE;
+DROP TABLE IF EXISTS agents CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+
+DROP TYPE IF EXISTS message_role CASCADE;
+DROP TYPE IF EXISTS document_status CASCADE;
+DROP TYPE IF EXISTS file_type CASCADE;
+DROP TYPE IF EXISTS tone CASCADE;
 
 -- ============================================================
 -- 1. Extensions
@@ -19,31 +31,16 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- 2. Enums
 -- ============================================================
 
-DO $$ BEGIN
-  CREATE TYPE tone AS ENUM ('neutre', 'pedagogique', 'academique');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  CREATE TYPE file_type AS ENUM ('pdf', 'txt', 'csv', 'json');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  CREATE TYPE document_status AS ENUM ('pending', 'processing', 'ready', 'error');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  CREATE TYPE message_role AS ENUM ('user', 'assistant', 'system');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
+CREATE TYPE tone AS ENUM ('neutre', 'pedagogique', 'academique');
+CREATE TYPE file_type AS ENUM ('pdf', 'txt', 'csv', 'json');
+CREATE TYPE document_status AS ENUM ('pending', 'processing', 'ready', 'error');
+CREATE TYPE message_role AS ENUM ('user', 'assistant', 'system');
 
 -- ============================================================
 -- 3. Users table (extends Supabase auth.users)
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE users (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   email VARCHAR(320) NOT NULL UNIQUE,
   full_name VARCHAR(200),
@@ -55,19 +52,14 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS users_email_idx ON users(email);
-CREATE INDEX IF NOT EXISTS users_plan_idx ON users(plan);
-
--- Insert a default system user for existing data
-INSERT INTO users (id, email, full_name, plan)
-VALUES ('00000000-0000-0000-0000-000000000000', 'system@sia.app', 'System', 'enterprise')
-ON CONFLICT (id) DO NOTHING;
+CREATE INDEX users_email_idx ON users(email);
+CREATE INDEX users_plan_idx ON users(plan);
 
 -- ============================================================
 -- 4. Agents table
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS agents (
+CREATE TABLE agents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name VARCHAR(200) NOT NULL,
@@ -81,14 +73,14 @@ CREATE TABLE IF NOT EXISTS agents (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS agents_user_id_idx ON agents(user_id);
-CREATE INDEX IF NOT EXISTS agents_tone_idx ON agents(tone);
+CREATE INDEX agents_user_id_idx ON agents(user_id);
+CREATE INDEX agents_tone_idx ON agents(tone);
 
 -- ============================================================
 -- 5. SaaS Documents table (uploaded files)
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS saas_documents (
+CREATE TABLE saas_documents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
@@ -104,16 +96,16 @@ CREATE TABLE IF NOT EXISTS saas_documents (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS saas_documents_user_id_idx ON saas_documents(user_id);
-CREATE INDEX IF NOT EXISTS saas_documents_agent_id_idx ON saas_documents(agent_id);
-CREATE INDEX IF NOT EXISTS saas_documents_status_idx ON saas_documents(status);
-CREATE INDEX IF NOT EXISTS saas_documents_file_type_idx ON saas_documents(file_type);
+CREATE INDEX saas_documents_user_id_idx ON saas_documents(user_id);
+CREATE INDEX saas_documents_agent_id_idx ON saas_documents(agent_id);
+CREATE INDEX saas_documents_status_idx ON saas_documents(status);
+CREATE INDEX saas_documents_file_type_idx ON saas_documents(file_type);
 
 -- ============================================================
 -- 6. Chunks table (text segments with vector embeddings)
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS chunks (
+CREATE TABLE chunks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   document_id UUID NOT NULL REFERENCES saas_documents(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -127,12 +119,12 @@ CREATE TABLE IF NOT EXISTS chunks (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS chunks_document_id_idx ON chunks(document_id);
-CREATE INDEX IF NOT EXISTS chunks_user_id_idx ON chunks(user_id);
-CREATE INDEX IF NOT EXISTS chunks_source_idx ON chunks(source);
+CREATE INDEX chunks_document_id_idx ON chunks(document_id);
+CREATE INDEX chunks_user_id_idx ON chunks(user_id);
+CREATE INDEX chunks_source_idx ON chunks(source);
 
 -- HNSW index for fast vector similarity search (cosine distance)
-CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
+CREATE INDEX chunks_embedding_hnsw_idx
   ON chunks
   USING hnsw (embedding vector_cosine_ops)
   WITH (m = 16, ef_construction = 64);
@@ -141,7 +133,7 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
 -- 7. Conversations table
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS conversations (
+CREATE TABLE conversations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
@@ -151,15 +143,15 @@ CREATE TABLE IF NOT EXISTS conversations (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS conversations_user_id_idx ON conversations(user_id);
-CREATE INDEX IF NOT EXISTS conversations_agent_id_idx ON conversations(agent_id);
-CREATE INDEX IF NOT EXISTS conversations_updated_at_idx ON conversations(updated_at);
+CREATE INDEX conversations_user_id_idx ON conversations(user_id);
+CREATE INDEX conversations_agent_id_idx ON conversations(agent_id);
+CREATE INDEX conversations_updated_at_idx ON conversations(updated_at);
 
 -- ============================================================
 -- 8. Messages table
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS messages (
+CREATE TABLE messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   role message_role NOT NULL,
@@ -169,9 +161,9 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS messages_conversation_id_idx ON messages(conversation_id);
-CREATE INDEX IF NOT EXISTS messages_role_idx ON messages(role);
-CREATE INDEX IF NOT EXISTS messages_created_at_idx ON messages(created_at);
+CREATE INDEX messages_conversation_id_idx ON messages(conversation_id);
+CREATE INDEX messages_role_idx ON messages(role);
+CREATE INDEX messages_created_at_idx ON messages(created_at);
 
 -- ============================================================
 -- 9. Add user_id to legacy document_chunks table
@@ -179,23 +171,6 @@ CREATE INDEX IF NOT EXISTS messages_created_at_idx ON messages(created_at);
 
 ALTER TABLE document_chunks
   ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE;
-
--- Backfill existing documents with system user
-UPDATE document_chunks
-SET user_id = '00000000-0000-0000-0000-000000000000'
-WHERE user_id IS NULL;
-
--- Make user_id NOT NULL after backfill
-ALTER TABLE document_chunks
-  ALTER COLUMN user_id SET NOT NULL;
-
-CREATE INDEX IF NOT EXISTS document_chunks_user_id_idx ON document_chunks(user_id);
-
--- HNSW index on legacy document_chunks (768 dimensions)
-CREATE INDEX IF NOT EXISTS document_chunks_embedding_hnsw_idx
-  ON document_chunks
-  USING hnsw (embedding vector_cosine_ops)
-  WITH (m = 16, ef_construction = 64);
 
 -- ============================================================
 -- 10. Row Level Security (RLS)
