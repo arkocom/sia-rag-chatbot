@@ -1,10 +1,13 @@
 import { NextRequest } from 'next/server'
-import { prisma } from '@/lib/db'
-import { ChatResponse, SourceReference, StreamEvent, API_VERSION } from '@/lib/types'
+import { db } from '@/lib/db'
+import { documents } from '@/lib/db/schema'
+import { sql } from 'drizzle-orm'
+import type { ChatResponse, SourceReference, StreamEvent } from '@/lib/types'
 
 export const dynamic = 'force-dynamic'
 
-// Extraction de mots-clés depuis la question
+const API_VERSION = '1.0.0'
+
 function extractKeywords(question: string): string[] {
   const stopWords = new Set([
     'le', 'la', 'les', 'un', 'une', 'des', 'de', 'du', 'et', 'ou', 'que', 'qui', 'quoi',
@@ -25,134 +28,178 @@ function extractKeywords(question: string): string[] {
   return [...new Set(words)]
 }
 
-// Recherche par mots-clés dans les chunks
-function searchChunksByKeywords(chunks: any[], keywords: string[]): any[] {
+interface ChunkRow {
+  id: string
+  content: string
+  source: string
+  reference: string
+  score?: number
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function searchChunksByKeywords(chunks: ChunkRow[], keywords: string[]): (ChunkRow & { score: number })[] {
   if (keywords.length === 0) return []
 
-  const scoredChunks = chunks.map(chunk => {
-    const content = (chunk.content || '').toLowerCase()
-    const reference = (chunk.reference || '').toLowerCase()
-    const combined = content + ' ' + reference
+  const safeKeywords = keywords
+    .map(k => escapeRegex(k))
+    .filter(k => k.length > 1)
 
-    let score = 0
-    for (const keyword of keywords) {
-      const regex = new RegExp(keyword, 'gi')
-      const matches = combined.match(regex)
-      if (matches) {
-        score += matches.length
+  if (safeKeywords.length === 0) return []
+
+  return chunks
+    .map(chunk => {
+      const combined = `${chunk.content} ${chunk.reference}`.toLowerCase()
+      let score = 0
+      for (const keyword of safeKeywords) {
+        try {
+          const matches = combined.match(new RegExp(keyword, 'gi'))
+          if (matches) score += matches.length
+        } catch {
+          // Skip invalid regex
+          if (combined.includes(keyword.toLowerCase())) score += 1
+        }
       }
-    }
-
-    return { ...chunk, score }
-  })
-
-  return scoredChunks
+      return { ...chunk, score }
+    })
     .filter(chunk => chunk.score > 0)
     .sort((a, b) => b.score - a.score)
 }
 
-// Sélection des chunks pertinents via recherche + LLM (GEMINI)
+/**
+ * Étape 1 : Gemini génère les termes de recherche en arabe et en français
+ * à partir de la question de l'utilisateur.
+ */
+async function generateSearchTerms(
+  question: string,
+  genAI: InstanceType<typeof import('@google/generative-ai').GoogleGenerativeAI>
+): Promise<string[]> {
+  const frenchKeywords = extractKeywords(question)
+
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
+    const result = await model.generateContent(
+      `Donne-moi les mots-clés de recherche pour trouver des passages coraniques, hadiths et textes islamiques sur ce sujet.
+
+Question : "${question}"
+
+Réponds UNIQUEMENT avec une liste de mots-clés séparés par des virgules, en incluant :
+- Les mots-clés en arabe (termes coraniques pertinents)
+- Les mots-clés en français
+
+Exemple pour "patience" : صبر,الصبر,صابرين,patience,endurant,épreuve
+
+Mots-clés :`
+    )
+    const terms = result.response.text()
+      .split(',')
+      .map(t => t.trim())
+      .filter(t => t.length > 1)
+
+    return [...new Set([...frenchKeywords, ...terms])]
+  } catch {
+    return frenchKeywords
+  }
+}
+
 async function selectRelevantChunks(
   userQuestion: string,
-  allChunks: any[],
-  limit: number = 8
+  allChunks: ChunkRow[],
+  limit: number = 8,
+  genAI: InstanceType<typeof import('@google/generative-ai').GoogleGenerativeAI>
 ) {
   const startTime = Date.now()
-  const keywords = extractKeywords(userQuestion)
-  console.log('Mots-clés extraits:', keywords)
 
-  const keywordResults = searchChunksByKeywords(allChunks, keywords)
-  console.log(`Résultats recherche: ${keywordResults.length} chunks trouvés`)
+  // Étape 1 : Générer des termes de recherche bilingues (FR + AR)
+  const searchTerms = await generateSearchTerms(userQuestion, genAI)
+  const keywordResults = searchChunksByKeywords(allChunks, searchTerms)
 
-  // Diversifier les sources
-  const coranChunks = keywordResults.filter(c => c.source === 'coran').slice(0, 20)
-  const hadithChunks = keywordResults.filter(c => c.source === 'hadith').slice(0, 10)
-  const imamChunks = keywordResults.filter(c => c.source === 'imam').slice(0, 15)
+  // Étape 2 : Collecter les candidats par mots-clés
+  const coranChunks = keywordResults.filter(c => c.source === 'coran').slice(0, 40)
+  const hadithChunks = keywordResults.filter(c => c.source === 'hadith').slice(0, 20)
+  const imamChunks = keywordResults.filter(c => c.source === 'imam').slice(0, 20)
 
-  let candidateChunks = [...coranChunks, ...hadithChunks, ...imamChunks]
+  let candidateChunks: ChunkRow[] = [...coranChunks, ...hadithChunks, ...imamChunks]
 
-  if (candidateChunks.length < 20) {
-    const randomCoran = allChunks
-      .filter(c => c.source === 'coran')
-      .sort(() => Math.random() - 0.5)
-      .slice(0, 10)
-    const randomHadith = allChunks
-      .filter(c => c.source === 'hadith')
-      .slice(0, 5)
-    const randomImam = allChunks
-      .filter(c => c.source === 'imam')
-      .sort(() => Math.random() - 0.5)
-      .slice(0, 10)
+  // Étape 3 : Si peu de résultats par mots-clés, échantillonner la base
+  // pour que Gemini puisse sélectionner dans un pool plus large
+  if (candidateChunks.length < 30) {
+    const existingIds = new Set(candidateChunks.map(c => c.id))
+    const remaining = allChunks.filter(c => !existingIds.has(c.id))
 
-    candidateChunks = [...candidateChunks, ...randomCoran, ...randomHadith, ...randomImam]
+    // Échantillonner proportionnellement par source
+    const sampleCoran = remaining.filter(c => c.source === 'coran')
+      .sort(() => Math.random() - 0.5).slice(0, 40)
+    const sampleHadith = remaining.filter(c => c.source === 'hadith')
+      .sort(() => Math.random() - 0.5).slice(0, 15)
+    const sampleImam = remaining.filter(c => c.source === 'imam')
+      .sort(() => Math.random() - 0.5).slice(0, 15)
+
+    candidateChunks = [...candidateChunks, ...sampleCoran, ...sampleHadith, ...sampleImam]
   }
 
-  // Dédupliquer
-  const seen = new Set()
+  // Déduplication
+  const seen = new Set<string>()
   candidateChunks = candidateChunks.filter(chunk => {
     if (seen.has(chunk.id)) return false
     seen.add(chunk.id)
     return true
-  }).slice(0, 45)
+  }).slice(0, 80)
 
-  console.log(`Candidats pour LLM: ${candidateChunks.length} chunks`)
-
-  // Sélection finale par LLM (GEMINI)
+  // Étape 4 : Gemini sélectionne les passages pertinents
   const chunksText = candidateChunks
-    .map((chunk: any, idx: number) => `[${idx}] ${chunk?.reference}: ${chunk?.content?.substring(0, 250)}`)
+    .map((chunk, idx) => `[${idx}] ${chunk.reference}: ${chunk.content.substring(0, 300)}`)
     .join('\n\n')
 
-  const selectionPrompt = `Tu es un expert en sources islamiques. Voici une liste de passages numérotés provenant du Coran, des Hadiths et des ouvrages des Imams.
+  const selectionPrompt = `Tu es un expert en sources islamiques. Tu comprends l'arabe et le français.
 
 QUESTION DE L'UTILISATEUR : "${userQuestion}"
 
 PASSAGES DISPONIBLES :
 ${chunksText}
 
-TÂCHE : Sélectionne les ${limit} passages les PLUS PERTINENTS pour répondre à cette question.
-- Cherche des passages qui traitent DIRECTEMENT du sujet demandé
+TÂCHE : Sélectionne TOUS les passages qui sont PERTINENTS pour répondre à cette question (jusqu'à ${limit} maximum).
+- Le contenu est souvent en arabe : lis et comprends le texte arabe pour juger de la pertinence
+- Inclus TOUT passage qui traite directement ou indirectement du sujet demandé
+- Ne rejette un passage que s'il est clairement hors-sujet
 - Diversifie les sources si possible (Coran, Hadiths, Imams)
-- Ne sélectionne PAS des passages hors-sujet
 
-Réponds UNIQUEMENT avec les numéros entre crochets, séparés par des virgules. Exemple: [0],[5],[12],[23],[31]
+Réponds UNIQUEMENT avec les numéros entre crochets, séparés par des virgules. Exemple: [0],[5],[12],[3],[18]
 
 Numéros sélectionnés:`
 
   try {
-    const { GoogleGenerativeAI } = await import("@google/generative-ai");
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
-    const result = await model.generateContent(selectionPrompt);
-    const selection = result.response.text();
-
-    console.log('Sélection LLM:', selection)
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
+    const result = await model.generateContent(selectionPrompt)
+    const selection = result.response.text()
 
     const selectedIndices = [...selection.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1]))
-
     const selectedChunks = selectedIndices
       .filter(idx => idx >= 0 && idx < candidateChunks.length)
       .map(idx => candidateChunks[idx])
       .slice(0, limit)
 
-    console.log(`Chunks finaux sélectionnés: ${selectedChunks.length}`)
     return {
       chunks: selectedChunks.length > 0 ? selectedChunks : candidateChunks.slice(0, limit),
       searchTime: Date.now() - startTime,
       totalSearched: allChunks.length,
       keywordMatchCount: keywordResults.length,
-      extractedKeywords: keywords
     }
   } catch (error) {
-    console.error('Erreur lors de la sélection (Gemini):', error)
+    console.error('Erreur sélection Gemini:', error)
     return {
       chunks: candidateChunks.slice(0, limit),
       searchTime: Date.now() - startTime,
       totalSearched: allChunks.length,
       keywordMatchCount: keywordResults.length,
-      extractedKeywords: keywords
     }
   }
+}
+
+function sendSSE(event: StreamEvent): string {
+  return `data: ${JSON.stringify(event)}\n\n`
 }
 
 export async function POST(request: NextRequest) {
@@ -160,26 +207,29 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json()
-    const userMessage = body?.message
+    const userMessage: string | undefined = body?.message
 
     if (!userMessage) {
-      return new Response(
-        JSON.stringify({ error: 'Message requis' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      )
+      return new Response(JSON.stringify({ error: 'Message requis' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      })
     }
 
-    // Récupérer tous les chunks
-    const allChunks = await prisma.documentChunk.findMany({
-      select: {
-        id: true,
-        content: true,
-        source: true,
-        reference: true,
-      }
-    })
+    // Récupérer tous les documents via Drizzle
+    const allChunks = await db
+      .select({
+        id: documents.id,
+        content: documents.content,
+        source: documents.source,
+        reference: documents.reference,
+      })
+      .from(documents)
 
-    if (!allChunks || allChunks.length === 0) {
+    const { GoogleGenerativeAI } = await import('@google/generative-ai')
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
+
+    if (allChunks.length === 0) {
       const emptyResponse: ChatResponse = {
         response_text: "Je n'ai pas trouvé de passages dans les sources disponibles. La base de données semble vide.",
         sources: [],
@@ -189,63 +239,20 @@ export async function POST(request: NextRequest) {
           sources_selected: 0,
           model: 'gemini-2.5-flash',
           api_version: API_VERSION,
-          timestamp: new Date().toISOString()
-        }
+          timestamp: new Date().toISOString(),
+        },
       }
-
-      const streamEvent: StreamEvent = { status: 'completed', result: emptyResponse }
-
-      return new Response(
-        `data: ${JSON.stringify(streamEvent)}\n\n`,
-        {
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-          },
-        }
-      )
+      return new Response(sendSSE({ status: 'completed', result: emptyResponse }), {
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      })
     }
 
-    // Sélectionner les chunks pertinents
-    const { chunks: relevantChunks, totalSearched, keywordMatchCount, extractedKeywords } = await selectRelevantChunks(
-      userMessage,
-      allChunks,
-      5
-    )
+    const { chunks: relevantChunks, totalSearched, keywordMatchCount } =
+      await selectRelevantChunks(userMessage, allChunks, 20, genAI)
 
-    // Si un seul mot-clé et beaucoup de résultats, demander précisions
-    if (extractedKeywords && extractedKeywords.length === 1 && keywordMatchCount && keywordMatchCount > 10) {
-      const tooManyResponse: ChatResponse = {
-        response_text: `J'ai trouvé ${keywordMatchCount} passages mentionnant "${extractedKeywords[0]}". C'est beaucoup !\n\nPourriez-vous préciser le contexte ou la situation qui vous intéresse concernant ce mot ?`,
-        sources: [],
-        metadata: {
-          processing_time_ms: Date.now() - requestStartTime,
-          sources_searched: totalSearched,
-          sources_selected: 0,
-          model: 'none',
-          api_version: API_VERSION,
-          timestamp: new Date().toISOString()
-        }
-      }
-
-      const streamEvent: StreamEvent = { status: 'completed', result: tooManyResponse }
-
-      return new Response(
-        `data: ${JSON.stringify(streamEvent)}\n\n`,
-        {
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-          },
-        }
-      )
-    }
-
-    if (!relevantChunks || relevantChunks.length === 0) {
+    if (relevantChunks.length === 0) {
       const noResultResponse: ChatResponse = {
-        response_text: "Désolé, je n'ai trouvé aucune corrélation avec votre demande dans les sources disponibles. Veuillez reformuler votre question.",
+        response_text: "Désolé, je n'ai trouvé aucune corrélation dans les sources disponibles. Veuillez reformuler votre question.",
         sources: [],
         metadata: {
           processing_time_ms: Date.now() - requestStartTime,
@@ -253,113 +260,76 @@ export async function POST(request: NextRequest) {
           sources_selected: 0,
           model: 'gemini-2.5-flash',
           api_version: API_VERSION,
-          timestamp: new Date().toISOString()
-        }
+          timestamp: new Date().toISOString(),
+        },
       }
-
-      const streamEvent: StreamEvent = { status: 'completed', result: noResultResponse }
-
-      return new Response(
-        `data: ${JSON.stringify(streamEvent)}\n\n`,
-        {
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-          },
-        }
-      )
+      return new Response(sendSSE({ status: 'completed', result: noResultResponse }), {
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      })
     }
 
-    // Construire les sources avec scores
-    const sources: SourceReference[] = relevantChunks.map((chunk: any, idx: number) => ({
+    const sources: SourceReference[] = relevantChunks.map((chunk, idx) => ({
       id: chunk.id,
-      score: Math.round((1 - idx * 0.1) * 100) / 100,
-      snippet: chunk.content?.substring(0, 300) || '',
-      reference: chunk.reference || '',
-      source_type: chunk.source as 'coran' | 'hadith' | 'imam'
+      score: Math.round((1 - idx * 0.05) * 100) / 100,
+      snippet: chunk.content.substring(0, 500),
+      reference: chunk.reference,
+      source_type: chunk.source as 'coran' | 'hadith' | 'imam',
     }))
 
-    // Construire le contexte
     const sourceContext = relevantChunks
-      .map((chunk: any) => `[${chunk?.reference}]\n${chunk?.content}`)
+      .map(chunk => `[${chunk.reference}]\n${chunk.content}`)
       .join('\n\n---\n\n')
 
-    // Prompt ULTRA-STRICT
-    const systemPrompt = `Tu es SIA (Sources Islamiques Authentiques), un TRANSMETTEUR NEUTRE de textes authentiques.
+    const systemPrompt = `Tu es SIA (Sources Islamiques Authentiques), un TRANSMETTEUR NEUTRE.
 
-## INTERDICTION ABSOLUE D'INTERPRÉTATION
+## RÈGLE ABSOLUE : BASE DE DONNÉES UNIQUEMENT
 
-Tu n'es PAS un savant. Tu n'es PAS un imam. Tu n'es PAS qualifié pour interpréter.
-Tu es UNIQUEMENT un transmetteur fidèle des textes.
+Tu ne dois JAMAIS utiliser tes propres connaissances. TOUT ce que tu affiches doit provenir EXCLUSIVEMENT des SOURCES DISPONIBLES ci-dessous. Si une information n'est pas dans les sources fournies, elle N'EXISTE PAS pour toi.
 
-INTERDIT - Ne JAMAIS faire :
-- "Ce verset signifie que..." -> INTERPRÉTATION
-- "On peut comprendre que..." -> INTERPRÉTATION
-- "Cela nous enseigne que..." -> INTERPRÉTATION
-- "L'islam dit que..." -> INTERPRÉTATION
-- "Le message est..." -> INTERPRÉTATION
-- "En d'autres termes..." -> INTERPRÉTATION
-- "Autrement dit..." -> INTERPRÉTATION
-- "Cela veut dire..." -> INTERPRÉTATION
-- Tirer des conclusions -> INTERPRÉTATION
-- Donner des conseils -> INTERPRÉTATION
-- Expliquer le "pourquoi" -> INTERPRÉTATION
+INTERDIT ABSOLUMENT :
+- Ajouter un verset, hadith ou texte qui n'est PAS dans les sources ci-dessous
+- Compléter ou enrichir avec tes connaissances personnelles
+- Citer une source que tu connais mais qui n'est pas fournie
+- Inventer ou reformuler le contenu d'un passage
+- Donner une interprétation, explication, conseil ou conclusion
+- Ajouter une introduction ou conclusion
 
-AUTORISÉ - Tu peux UNIQUEMENT :
-- Citer le texte EXACT de la source
-- Donner la référence précise
-- Traduire littéralement (pour l'arabe -> français)
-- Dire "Les sources disponibles ne mentionnent pas ce sujet"
+## LANGUE : FRANÇAIS
 
-## SOURCES DISPONIBLES (les SEULES que tu peux citer)
-- Le Noble Coran (texte arabe)
-- Les Hadiths du Prophète (paix et salut sur lui)
-- Riyad as-Salihin (An-Nawawi)
-- Al-Adab al-Mufrad (Al-Bukhari)
-- Ihya' Ulum al-Din (Al-Ghazali)
-- La Risala (Al-Qayrawani)
+Réponds en français. Si le texte source est en arabe, présente-le ainsi :
+1. Référence en français
+2. Traduction française littérale
+3. Texte arabe original sur sa propre ligne
 
-## CONTEXTE - SEULES SOURCES À UTILISER
+## SOURCES DISPONIBLES (BASE DE DONNÉES)
 ${sourceContext}
 
-## QUESTION ACTUELLE
+## QUESTION
 ${userMessage}
 
-## FORMAT DE RÉPONSE STRICT
+## FORMAT
 
-Pour chaque source pertinente, utilise CE FORMAT EXACT :
+Pour CHAQUE source ci-dessus qui est pertinente :
 
 **[Référence exacte]**
-« [Citation EXACTE du texte] »
-Traduction : « [Traduction LITTÉRALE si arabe] »
+Traduction : « [Traduction LITTÉRALE en français] »
+[Texte arabe original]
 
 ---
 
-NE RIEN AJOUTER D'AUTRE. Pas d'introduction. Pas de conclusion. Pas de "en résumé". Pas de conseil.
+Cite TOUS les passages pertinents des SOURCES DISPONIBLES ci-dessus. N'en omets aucun.
+N'ajoute RIEN qui ne vient pas des sources ci-dessus. RIEN.
 
-Si la question demande ton avis ou une interprétation, réponds :
-"Je ne suis pas habilité à interpréter les textes sacrés. Voici les sources qui abordent ce sujet : [citations]"
+Si aucune source ci-dessus ne traite du sujet :
+"Les sources disponibles ne contiennent pas de passage traitant directement de ce sujet."`
 
-Si aucune source ne répond à la question, dis simplement :
-"Les sources disponibles (Coran, Hadiths, ouvrages des Imams) ne contiennent pas de passage traitant directement de ce sujet."
-
-RAPPEL FINAL : Tu TRANSMETS. Tu N'INTERPRÈTES JAMAIS.`
-
-    // Appel à GEMINI API avec streaming
-    const { GoogleGenerativeAI } = await import("@google/generative-ai");
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
     const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",
-      generationConfig: {
-        maxOutputTokens: 2000,
-        temperature: 0.3,
-      }
-    });
+      model: 'gemini-2.5-flash',
+      generationConfig: { maxOutputTokens: 8000, temperature: 0.1 },
+    })
 
-    const result = await model.generateContentStream(systemPrompt);
+    const result = await model.generateContentStream(systemPrompt)
 
-    // Stream la réponse
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder()
@@ -367,56 +337,49 @@ RAPPEL FINAL : Tu TRANSMETS. Tu N'INTERPRÈTES JAMAIS.`
 
         try {
           for await (const chunk of result.stream) {
-            const chunkText = chunk.text();
-            buffer += chunkText;
-
-            const partialResponseEvent = {
-              choices: [{ delta: { content: chunkText } }]
-            }
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(partialResponseEvent)}\n\n`));
+            const chunkText = chunk.text()
+            buffer += chunkText
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: chunkText } }] })}\n\n`)
+            )
           }
 
-          // Construire la réponse finale
           const finalResponse: ChatResponse = {
             response_text: buffer,
-            sources: sources,
+            sources,
             metadata: {
               processing_time_ms: Date.now() - requestStartTime,
               sources_searched: totalSearched,
               sources_selected: relevantChunks.length,
               model: 'gemini-2.5-flash',
               api_version: API_VERSION,
-              timestamp: new Date().toISOString()
-            }
+              timestamp: new Date().toISOString(),
+            },
           }
 
-          const finalEvent: StreamEvent = { status: 'completed', result: finalResponse }
-
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalEvent)}\n\n`))
-          controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+          controller.enqueue(encoder.encode(sendSSE({ status: 'completed', result: finalResponse })))
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'))
           controller.close()
-
         } catch (error) {
           console.error('Stream error:', error)
-          const errorEvent: StreamEvent = { status: 'error', error: 'Une erreur est survenue' }
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`))
+          controller.enqueue(encoder.encode(sendSSE({ status: 'error', error: 'Erreur de génération' })))
           controller.close()
         }
       },
     })
 
     return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      },
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
     })
   } catch (error) {
-    console.error('Erreur dans /api/chat:', error)
-    return new Response(
-      JSON.stringify({ error: 'Erreur serveur' }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
-    )
+    console.error('Erreur /api/chat:', error instanceof Error ? error.message : error)
+    console.error('Stack:', error instanceof Error ? error.stack : 'N/A')
+    return new Response(JSON.stringify({
+      error: 'Erreur serveur',
+      details: error instanceof Error ? error.message : String(error),
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    })
   }
 }
