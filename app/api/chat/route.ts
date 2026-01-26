@@ -1,22 +1,6 @@
 import { NextRequest } from 'next/server'
 import { prisma } from '@/lib/db'
-import {
-  ChatResponse,
-  SourceReference,
-  StreamEvent,
-  calculateConfidence,
-  API_VERSION,
-  CONFIDENCE_THRESHOLD
-} from '@/lib/types'
-import { classifyIntent, shouldEscalate } from '@/lib/intent-classifier'
-import {
-  getOrCreateSession,
-  addUserMessage,
-  addAssistantMessage,
-  getContextSummary,
-  MAX_TURNS_BEFORE_ESCALATE
-} from '@/lib/session-manager'
-import { checkAndUpdateQuota, QuotaStatus } from '@/lib/quota-manager'
+import { ChatResponse, SourceReference, StreamEvent, API_VERSION } from '@/lib/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -71,8 +55,7 @@ function searchChunksByKeywords(chunks: any[], keywords: string[]): any[] {
 async function selectRelevantChunks(
   userQuestion: string,
   allChunks: any[],
-  limit: number = 8,
-  previousSources: string[] = []
+  limit: number = 8
 ) {
   const startTime = Date.now()
   const keywords = extractKeywords(userQuestion)
@@ -87,15 +70,6 @@ async function selectRelevantChunks(
   const imamChunks = keywordResults.filter(c => c.source === 'imam').slice(0, 15)
 
   let candidateChunks = [...coranChunks, ...hadithChunks, ...imamChunks]
-
-  // Favoriser les sources non encore citées
-  if (previousSources.length > 0) {
-    candidateChunks.sort((a, b) => {
-      const aUsed = previousSources.includes(a.reference) ? 1 : 0
-      const bUsed = previousSources.includes(b.reference) ? 1 : 0
-      return aUsed - bUsed // Moins utilisé = prioritaire
-    })
-  }
 
   if (candidateChunks.length < 20) {
     const randomCoran = allChunks
@@ -187,7 +161,6 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const userMessage = body?.message
-    const requestSessionId = body?.session_id
 
     if (!userMessage) {
       return new Response(
@@ -195,77 +168,6 @@ export async function POST(request: NextRequest) {
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       )
     }
-
-    // Identifier l'utilisateur (session_id ou IP)
-    const identifier = requestSessionId ||
-      request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-      request.headers.get('x-real-ip') ||
-      'anonymous'
-
-    // Vérifier le quota
-    const quotaStatus: QuotaStatus = await checkAndUpdateQuota(identifier)
-
-    if (!quotaStatus.allowed) {
-      const quotaResponse: ChatResponse = {
-        response_text: quotaStatus.message || "Quota journalier atteint. Passez à l'offre Essentiel pour un accès illimité.",
-        sources: [],
-        intent: 'greeting',
-        confidence: 1,
-        session_id: requestSessionId || '',
-        actions: [{ type: 'upgrade_plan' as any }],
-        metadata: {
-          processing_time_ms: Date.now() - requestStartTime,
-          sources_searched: 0,
-          sources_selected: 0,
-          model: 'none',
-          api_version: API_VERSION,
-          timestamp: new Date().toISOString(),
-          quota: {
-            plan: quotaStatus.plan,
-            dailyUsed: quotaStatus.dailyUsed,
-            dailyLimit: quotaStatus.dailyLimit,
-            remaining: quotaStatus.remaining,
-            resetAt: quotaStatus.resetAt.toISOString()
-          }
-        }
-      }
-
-      const streamEvent: StreamEvent = {
-        status: 'completed',
-        result: quotaResponse
-      }
-
-      return new Response(
-        `data: ${JSON.stringify(streamEvent)}\n\n`,
-        {
-          status: 429,
-          headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'X-Quota-Remaining': String(quotaStatus.remaining),
-            'X-Quota-Reset': quotaStatus.resetAt.toISOString()
-          },
-        }
-      )
-    }
-
-    // Récupérer ou créer la session
-    const session = await getOrCreateSession(requestSessionId)
-    console.log(`Session: ${session.id} (${session.turnCount} tours)`)
-
-    // Classification de l'intention
-    const intentClassification = classifyIntent(userMessage)
-    console.log('Intent:', intentClassification)
-
-    // Ajouter le message utilisateur à la session
-    await addUserMessage(session.id, userMessage, intentClassification.intent)
-
-    // Récupérer le contexte de la conversation
-    const contextSummary = getContextSummary(session)
-
-    // Vérifier si escalade recommandée
-    const needsEscalation = shouldEscalate(intentClassification) ||
-      session.turnCount >= MAX_TURNS_BEFORE_ESCALATE
 
     // Récupérer tous les chunks
     const allChunks = await prisma.documentChunk.findMany({
@@ -279,28 +181,19 @@ export async function POST(request: NextRequest) {
 
     if (!allChunks || allChunks.length === 0) {
       const emptyResponse: ChatResponse = {
-        response_text: "Je n'ai pas trouvé de passages dans les sources disponibles (Coran et Hadiths). La base de données semble vide.",
+        response_text: "Je n'ai pas trouvé de passages dans les sources disponibles. La base de données semble vide.",
         sources: [],
-        intent: intentClassification.intent,
-        confidence: 0.1,
-        session_id: session.id,
-        actions: [{ type: 'none' }],
         metadata: {
           processing_time_ms: Date.now() - requestStartTime,
           sources_searched: 0,
           sources_selected: 0,
-          model: 'gemini-1.5-flash',
+          model: 'gemini-2.5-flash',
           api_version: API_VERSION,
           timestamp: new Date().toISOString()
         }
       }
 
-      await addAssistantMessage(session.id, emptyResponse.response_text, intentClassification.intent, 0.1, [])
-
-      const streamEvent: StreamEvent = {
-        status: 'completed',
-        result: emptyResponse
-      }
+      const streamEvent: StreamEvent = { status: 'completed', result: emptyResponse }
 
       return new Response(
         `data: ${JSON.stringify(streamEvent)}\n\n`,
@@ -314,23 +207,18 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Sélectionner les chunks pertinents (en évitant les sources déjà citées)
-    const { chunks: relevantChunks, searchTime, totalSearched, keywordMatchCount, extractedKeywords } = await selectRelevantChunks(
+    // Sélectionner les chunks pertinents
+    const { chunks: relevantChunks, totalSearched, keywordMatchCount, extractedKeywords } = await selectRelevantChunks(
       userMessage,
       allChunks,
-      5,
-      contextSummary.previousSources
+      5
     )
 
-    // Si un seul mot-clé et beaucoup de résultats (> 10), demander précisions
+    // Si un seul mot-clé et beaucoup de résultats, demander précisions
     if (extractedKeywords && extractedKeywords.length === 1 && keywordMatchCount && keywordMatchCount > 10) {
-      const toolManyResultsResponse: ChatResponse = {
-        response_text: `J'ai trouvé ${keywordMatchCount} passages mentionnant "${extractedKeywords[0]}". C'est beaucoup ! 📚\n\nPourriez-vous préciser le contexte ou la situation qui vous intéresse concernant ce mot ?`,
+      const tooManyResponse: ChatResponse = {
+        response_text: `J'ai trouvé ${keywordMatchCount} passages mentionnant "${extractedKeywords[0]}". C'est beaucoup !\n\nPourriez-vous préciser le contexte ou la situation qui vous intéresse concernant ce mot ?`,
         sources: [],
-        intent: intentClassification.intent,
-        confidence: 0.5,
-        session_id: session.id,
-        actions: [{ type: 'clarify' }],
         metadata: {
           processing_time_ms: Date.now() - requestStartTime,
           sources_searched: totalSearched,
@@ -341,12 +229,7 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      await addAssistantMessage(session.id, toolManyResultsResponse.response_text, intentClassification.intent, 0.5, [])
-
-      const streamEvent: StreamEvent = {
-        status: 'completed',
-        result: toolManyResultsResponse
-      }
+      const streamEvent: StreamEvent = { status: 'completed', result: tooManyResponse }
 
       return new Response(
         `data: ${JSON.stringify(streamEvent)}\n\n`,
@@ -364,26 +247,17 @@ export async function POST(request: NextRequest) {
       const noResultResponse: ChatResponse = {
         response_text: "Désolé, je n'ai trouvé aucune corrélation avec votre demande dans les sources disponibles. Veuillez reformuler votre question.",
         sources: [],
-        intent: intentClassification.intent,
-        confidence: 0.2,
-        session_id: session.id,
-        actions: [{ type: 'clarify' }],
         metadata: {
           processing_time_ms: Date.now() - requestStartTime,
           sources_searched: totalSearched,
           sources_selected: 0,
-          model: 'gemini-1.5-flash',
+          model: 'gemini-2.5-flash',
           api_version: API_VERSION,
           timestamp: new Date().toISOString()
         }
       }
 
-      await addAssistantMessage(session.id, noResultResponse.response_text, intentClassification.intent, 0.2, [])
-
-      const streamEvent: StreamEvent = {
-        status: 'completed',
-        result: noResultResponse
-      }
+      const streamEvent: StreamEvent = { status: 'completed', result: noResultResponse }
 
       return new Response(
         `data: ${JSON.stringify(streamEvent)}\n\n`,
@@ -411,55 +285,41 @@ export async function POST(request: NextRequest) {
       .map((chunk: any) => `[${chunk?.reference}]\n${chunk?.content}`)
       .join('\n\n---\n\n')
 
-    // Ajouter l'historique de conversation au prompt si multi-tour
-    let conversationContext = ''
-    if (contextSummary.turnCount > 0 && contextSummary.formattedHistory) {
-      conversationContext = `
-## HISTORIQUE DE LA CONVERSATION (${contextSummary.turnCount} échanges précédents)
-${contextSummary.formattedHistory}
-
-## SUJETS DÉJÀ ABORDÉS
-${contextSummary.topics.length > 0 ? contextSummary.topics.join(', ') : 'Aucun'}
-
----
-`
-    }
-
-    // Prompt ULTRA-STRICT avec contexte conversationnel
+    // Prompt ULTRA-STRICT
     const systemPrompt = `Tu es SIA (Sources Islamiques Authentiques), un TRANSMETTEUR NEUTRE de textes authentiques.
 
-## ⛔ INTERDICTION ABSOLUE D'INTERPRÉTATION ⛔
+## INTERDICTION ABSOLUE D'INTERPRÉTATION
 
 Tu n'es PAS un savant. Tu n'es PAS un imam. Tu n'es PAS qualifié pour interpréter.
 Tu es UNIQUEMENT un transmetteur fidèle des textes.
 
 INTERDIT - Ne JAMAIS faire :
-❌ "Ce verset signifie que..." → INTERPRÉTATION
-❌ "On peut comprendre que..." → INTERPRÉTATION  
-❌ "Cela nous enseigne que..." → INTERPRÉTATION
-❌ "L'islam dit que..." → INTERPRÉTATION
-❌ "Le message est..." → INTERPRÉTATION
-❌ "En d'autres termes..." → INTERPRÉTATION
-❌ "Autrement dit..." → INTERPRÉTATION
-❌ "Cela veut dire..." → INTERPRÉTATION
-❌ Tirer des conclusions → INTERPRÉTATION
-❌ Donner des conseils → INTERPRÉTATION
-❌ Expliquer le "pourquoi" → INTERPRÉTATION
+- "Ce verset signifie que..." -> INTERPRÉTATION
+- "On peut comprendre que..." -> INTERPRÉTATION
+- "Cela nous enseigne que..." -> INTERPRÉTATION
+- "L'islam dit que..." -> INTERPRÉTATION
+- "Le message est..." -> INTERPRÉTATION
+- "En d'autres termes..." -> INTERPRÉTATION
+- "Autrement dit..." -> INTERPRÉTATION
+- "Cela veut dire..." -> INTERPRÉTATION
+- Tirer des conclusions -> INTERPRÉTATION
+- Donner des conseils -> INTERPRÉTATION
+- Expliquer le "pourquoi" -> INTERPRÉTATION
 
 AUTORISÉ - Tu peux UNIQUEMENT :
-✅ Citer le texte EXACT de la source
-✅ Donner la référence précise
-✅ Traduire littéralement (pour l'arabe → français)
-✅ Dire "Les sources disponibles ne mentionnent pas ce sujet"
+- Citer le texte EXACT de la source
+- Donner la référence précise
+- Traduire littéralement (pour l'arabe -> français)
+- Dire "Les sources disponibles ne mentionnent pas ce sujet"
 
 ## SOURCES DISPONIBLES (les SEULES que tu peux citer)
 - Le Noble Coran (texte arabe)
-- Les Hadiths du Prophète ﷺ
+- Les Hadiths du Prophète (paix et salut sur lui)
 - Riyad as-Salihin (An-Nawawi)
 - Al-Adab al-Mufrad (Al-Bukhari)
 - Ihya' Ulum al-Din (Al-Ghazali)
 - La Risala (Al-Qayrawani)
-${conversationContext}
+
 ## CONTEXTE - SEULES SOURCES À UTILISER
 ${sourceContext}
 
@@ -470,7 +330,7 @@ ${userMessage}
 
 Pour chaque source pertinente, utilise CE FORMAT EXACT :
 
-**📖 [Référence exacte]**
+**[Référence exacte]**
 « [Citation EXACTE du texte] »
 Traduction : « [Traduction LITTÉRALE si arabe] »
 
@@ -499,10 +359,6 @@ RAPPEL FINAL : Tu TRANSMETS. Tu N'INTERPRÈTES JAMAIS.`
 
     const result = await model.generateContentStream(systemPrompt);
 
-    // Variables pour le streaming
-    const sessionIdForStream = session.id
-    const intentForStream = intentClassification.intent
-
     // Stream la réponse
     const stream = new ReadableStream({
       async start(controller) {
@@ -514,83 +370,27 @@ RAPPEL FINAL : Tu TRANSMETS. Tu N'INTERPRÈTES JAMAIS.`
             const chunkText = chunk.text();
             buffer += chunkText;
 
-            const progressEvent: StreamEvent = {
-              status: 'processing',
-              message: 'Génération en cours...'
-            }
-            // Envoi d'un événement de progression (optionnel, peut être retiré pour réduire le trafic)
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(progressEvent)}\n\n`));
-
-            // On envoie aussi le contenu partiel si besoin, mais ici le client attend probablement le gros bloc ou des événements partiels de texte.
-            // Le client semble attendre des événements avec {choices...} comme OpenAI ou juste le texte final ?
-            // Le code client original semble parser OpenAI format. 
-            // Pour simplifier l'intégration sans toucher au frontend, nous allons à la fin envoyer tout d'un coup ou simuler le stream.
-            // Mais le code précédent parsait le stream OpenAI.
-            // Pour faire simple, on va adapter le format de sortie pour simuler ce que le client attend (objet StreamEvent).
-
-            // Simuler un morceau de contenu pour le client si nécessaire
             const partialResponseEvent = {
               choices: [{ delta: { content: chunkText } }]
             }
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(partialResponseEvent)}\n\n`));
           }
 
-          // Fin du stream
-
-          // Vérifier si la réponse indique qu'il n'y a pas de source pertinente
-          const noSourcePhrases = [
-            "Les sources disponibles",
-            "ne contiennent pas",
-            "pas de passage",
-            "aucune source",
-            "ne mentionnent pas",
-            "pas habilité à interpréter"
-          ]
-          const hasNoRelevantSource = noSourcePhrases.some(phrase =>
-            buffer.toLowerCase().includes(phrase.toLowerCase())
-          )
-
-          // Calculer le score de confiance
-          const confidence = calculateConfidence(
-            totalSearched,
-            hasNoRelevantSource ? 0 : relevantChunks.length,
-            intentClassification.confidence
-          )
-
-          // Sauvegarder la réponse dans la session
-          const finalSources = hasNoRelevantSource ? [] : sources
-          await addAssistantMessage(
-            sessionIdForStream,
-            buffer,
-            intentForStream,
-            confidence,
-            finalSources
-          )
-
           // Construire la réponse finale
           const finalResponse: ChatResponse = {
             response_text: buffer,
-            sources: finalSources,
-            intent: intentForStream,
-            confidence: confidence,
-            session_id: sessionIdForStream,
-            actions: [
-              { type: hasNoRelevantSource ? 'clarify' : 'cite_source' }
-            ],
+            sources: sources,
             metadata: {
               processing_time_ms: Date.now() - requestStartTime,
               sources_searched: totalSearched,
-              sources_selected: hasNoRelevantSource ? 0 : relevantChunks.length,
+              sources_selected: relevantChunks.length,
               model: 'gemini-2.5-flash',
               api_version: API_VERSION,
               timestamp: new Date().toISOString()
             }
           }
 
-          const finalEvent: StreamEvent = {
-            status: 'completed',
-            result: finalResponse
-          }
+          const finalEvent: StreamEvent = { status: 'completed', result: finalResponse }
 
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalEvent)}\n\n`))
           controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
@@ -598,10 +398,7 @@ RAPPEL FINAL : Tu TRANSMETS. Tu N'INTERPRÈTES JAMAIS.`
 
         } catch (error) {
           console.error('Stream error:', error)
-          const errorEvent: StreamEvent = {
-            status: 'error',
-            error: 'Une erreur est survenue'
-          }
+          const errorEvent: StreamEvent = { status: 'error', error: 'Une erreur est survenue' }
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`))
           controller.close()
         }
