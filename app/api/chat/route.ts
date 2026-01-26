@@ -62,28 +62,21 @@ async function selectRelevantChunks(
   const keywords = extractKeywords(userQuestion)
   const keywordResults = searchChunksByKeywords(allChunks, keywords)
 
-  const coranChunks = keywordResults.filter(c => c.source === 'coran').slice(0, 20)
-  const hadithChunks = keywordResults.filter(c => c.source === 'hadith').slice(0, 10)
-  const imamChunks = keywordResults.filter(c => c.source === 'imam').slice(0, 15)
+  const coranChunks = keywordResults.filter(c => c.source === 'coran').slice(0, 40)
+  const hadithChunks = keywordResults.filter(c => c.source === 'hadith').slice(0, 20)
+  const imamChunks = keywordResults.filter(c => c.source === 'imam').slice(0, 20)
 
   let candidateChunks: ChunkRow[] = [...coranChunks, ...hadithChunks, ...imamChunks]
-
-  if (candidateChunks.length < 20) {
-    const extra = allChunks
-      .sort(() => Math.random() - 0.5)
-      .slice(0, 25)
-    candidateChunks = [...candidateChunks, ...extra]
-  }
 
   const seen = new Set<string>()
   candidateChunks = candidateChunks.filter(chunk => {
     if (seen.has(chunk.id)) return false
     seen.add(chunk.id)
     return true
-  }).slice(0, 45)
+  }).slice(0, 80)
 
   const chunksText = candidateChunks
-    .map((chunk, idx) => `[${idx}] ${chunk.reference}: ${chunk.content.substring(0, 250)}`)
+    .map((chunk, idx) => `[${idx}] ${chunk.reference}: ${chunk.content.substring(0, 300)}`)
     .join('\n\n')
 
   const selectionPrompt = `Tu es un expert en sources islamiques. Voici une liste de passages numérotés.
@@ -93,11 +86,12 @@ QUESTION DE L'UTILISATEUR : "${userQuestion}"
 PASSAGES DISPONIBLES :
 ${chunksText}
 
-TÂCHE : Sélectionne les ${limit} passages les PLUS PERTINENTS pour répondre à cette question.
-- Cherche des passages qui traitent DIRECTEMENT du sujet demandé
+TÂCHE : Sélectionne TOUS les passages qui sont PERTINENTS pour répondre à cette question (jusqu'à ${limit} maximum).
+- Inclus TOUT passage qui traite directement ou indirectement du sujet demandé
+- Ne rejette un passage que s'il est clairement hors-sujet
 - Diversifie les sources si possible (Coran, Hadiths, Imams)
 
-Réponds UNIQUEMENT avec les numéros entre crochets, séparés par des virgules. Exemple: [0],[5],[12]
+Réponds UNIQUEMENT avec les numéros entre crochets, séparés par des virgules. Exemple: [0],[5],[12],[3],[18]
 
 Numéros sélectionnés:`
 
@@ -180,26 +174,8 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    const { chunks: relevantChunks, totalSearched, keywordMatchCount, extractedKeywords } =
-      await selectRelevantChunks(userMessage, allChunks, 5)
-
-    if (extractedKeywords.length === 1 && keywordMatchCount > 10) {
-      const clarifyResponse: ChatResponse = {
-        response_text: `J'ai trouvé ${keywordMatchCount} passages mentionnant "${extractedKeywords[0]}". Pourriez-vous préciser votre question ?`,
-        sources: [],
-        metadata: {
-          processing_time_ms: Date.now() - requestStartTime,
-          sources_searched: totalSearched,
-          sources_selected: 0,
-          model: 'none',
-          api_version: API_VERSION,
-          timestamp: new Date().toISOString(),
-        },
-      }
-      return new Response(sendSSE({ status: 'completed', result: clarifyResponse }), {
-        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
-      })
-    }
+    const { chunks: relevantChunks, totalSearched, keywordMatchCount } =
+      await selectRelevantChunks(userMessage, allChunks, 20)
 
     if (relevantChunks.length === 0) {
       const noResultResponse: ChatResponse = {
@@ -221,8 +197,8 @@ export async function POST(request: NextRequest) {
 
     const sources: SourceReference[] = relevantChunks.map((chunk, idx) => ({
       id: chunk.id,
-      score: Math.round((1 - idx * 0.1) * 100) / 100,
-      snippet: chunk.content.substring(0, 300),
+      score: Math.round((1 - idx * 0.05) * 100) / 100,
+      snippet: chunk.content.substring(0, 500),
       reference: chunk.reference,
       source_type: chunk.source as 'coran' | 'hadith' | 'imam',
     }))
@@ -279,18 +255,19 @@ Traduction : « [Traduction LITTÉRALE en français] »
 
 ---
 
+IMPORTANT : Cite TOUS les passages fournis ci-dessus qui sont pertinents. N'en omets aucun.
 NE RIEN AJOUTER D'AUTRE. Pas d'introduction. Pas de conclusion. Pas de conseil.
 
 Si aucune source ne répond, dis simplement :
 "Les sources disponibles ne contiennent pas de passage traitant directement de ce sujet."
 
-RAPPEL FINAL : Tu TRANSMETS en FRANÇAIS. Tu N'INTERPRÈTES JAMAIS.`
+RAPPEL FINAL : Tu TRANSMETS en FRANÇAIS. Tu N'INTERPRÈTES JAMAIS. Tu cites TOUTES les sources pertinentes.`
 
     const { GoogleGenerativeAI } = await import('@google/generative-ai')
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.5-flash',
-      generationConfig: { maxOutputTokens: 2000, temperature: 0.3 },
+      generationConfig: { maxOutputTokens: 8000, temperature: 0.3 },
     })
 
     const result = await model.generateContentStream(systemPrompt)
