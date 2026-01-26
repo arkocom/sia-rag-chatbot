@@ -36,16 +36,31 @@ interface ChunkRow {
   score?: number
 }
 
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function searchChunksByKeywords(chunks: ChunkRow[], keywords: string[]): (ChunkRow & { score: number })[] {
   if (keywords.length === 0) return []
+
+  const safeKeywords = keywords
+    .map(k => escapeRegex(k))
+    .filter(k => k.length > 1)
+
+  if (safeKeywords.length === 0) return []
 
   return chunks
     .map(chunk => {
       const combined = `${chunk.content} ${chunk.reference}`.toLowerCase()
       let score = 0
-      for (const keyword of keywords) {
-        const matches = combined.match(new RegExp(keyword, 'gi'))
-        if (matches) score += matches.length
+      for (const keyword of safeKeywords) {
+        try {
+          const matches = combined.match(new RegExp(keyword, 'gi'))
+          if (matches) score += matches.length
+        } catch {
+          // Skip invalid regex
+          if (combined.includes(keyword.toLowerCase())) score += 1
+        }
       }
       return { ...chunk, score }
     })
@@ -357,8 +372,12 @@ Si aucune source ci-dessus ne traite du sujet :
       headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
     })
   } catch (error) {
-    console.error('Erreur /api/chat:', error)
-    return new Response(JSON.stringify({ error: 'Erreur serveur' }), {
+    console.error('Erreur /api/chat:', error instanceof Error ? error.message : error)
+    console.error('Stack:', error instanceof Error ? error.stack : 'N/A')
+    return new Response(JSON.stringify({
+      error: 'Erreur serveur',
+      details: error instanceof Error ? error.message : String(error),
+    }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
     })
