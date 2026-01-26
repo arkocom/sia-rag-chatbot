@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Send, BookOpen, Shield, RefreshCw } from 'lucide-react'
+import { Send, BookOpen, Shield, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
@@ -97,6 +97,78 @@ function getSourceLabel(type: string): string {
     case 'hadith': return 'Hadith'
     default: return 'Imam'
   }
+}
+
+function SourcesList({ sources }: { sources: NonNullable<Message['sources']> }) {
+  const [allOpen, setAllOpen] = useState(false)
+
+  return (
+    <div className="mt-4 pt-4 border-t border-border">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+          <BookOpen className="w-3.5 h-3.5" />
+          Sources ({sources.length})
+        </p>
+        <button
+          onClick={() => setAllOpen(!allOpen)}
+          className="text-[10px] text-muted-foreground hover:text-foreground transition-colors px-2 py-0.5 rounded border border-border hover:bg-muted/50"
+        >
+          {allOpen ? 'Tout replier' : 'Tout déplier'}
+        </button>
+      </div>
+      <div className="space-y-1">
+        {sources.map((source, idx) => (
+          <SourceItemControlled
+            key={source.id || idx}
+            source={source}
+            index={idx}
+            forceOpen={allOpen}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SourceItemControlled({ source, index, forceOpen }: {
+  source: NonNullable<Message['sources']>[number],
+  index: number,
+  forceOpen: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const isOpen = forceOpen || open
+  const snippet = source?.snippet || ''
+  const frenchSnippet = snippet
+    .split('\n')
+    .filter((line: string) => !isArabicText(line.trim()))
+    .join(' ')
+    .trim()
+  const displayText = frenchSnippet || snippet.substring(0, 200)
+
+  return (
+    <div className="border border-border rounded-md overflow-hidden">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-muted/50 transition-colors text-left"
+      >
+        {isOpen
+          ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+          : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+        }
+        <span className="font-medium text-foreground flex-1 truncate">{source?.reference}</span>
+        <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium border flex-shrink-0 ${getSourceBadgeVariant(source.source_type)}`}>
+          {getSourceLabel(source.source_type)}
+        </span>
+      </button>
+      {isOpen && (
+        <div className="px-3 pb-3 pt-1 border-t border-border bg-muted/30">
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {displayText.substring(0, 300)}{displayText.length > 300 ? '...' : ''}
+          </p>
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function HomePage() {
@@ -377,33 +449,7 @@ export default function HomePage() {
 
                     {/* Sources */}
                     {message?.sources && message.sources.length > 0 && (
-                      <div className="mt-4 pt-4 border-t border-border">
-                        <p className="text-xs font-semibold text-muted-foreground mb-3 flex items-center gap-1.5">
-                          <BookOpen className="w-3.5 h-3.5" />
-                          Sources citées ({message.sources.length})
-                        </p>
-                        <div className="space-y-2">
-                          {message?.sources?.map((source, idx) => (
-                            <div key={source.id || idx} className="bg-muted/50 rounded-lg p-3 text-xs border border-border">
-                              <div className="flex items-center justify-between mb-2">
-                                <p className="font-semibold text-foreground">{source?.reference}</p>
-                                <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${getSourceBadgeVariant(source.source_type)}`}>
-                                  {getSourceLabel(source.source_type)}
-                                </span>
-                              </div>
-                              {isArabicText(source?.snippet || '') ? (
-                                <div className="arabic-text text-base leading-relaxed text-foreground/80">
-                                  {source?.snippet?.substring(0, 200)}
-                                </div>
-                              ) : (
-                                <p className="text-muted-foreground italic">
-                                  &laquo; {source?.snippet?.substring(0, 200)}... &raquo;
-                                </p>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
+                      <SourcesList sources={message.sources} />
                     )}
                   </CardContent>
                 </Card>
