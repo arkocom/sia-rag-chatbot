@@ -84,5 +84,25 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
   }
+}
+
+/* Arabic text styling */
+.arabic-text {
+  direction: rtl;
+  text-align: right;
+  font-family: "Traditional Arabic", "Scheherazade New", "Amiri", "Noto Naskh Arabic", serif;
+  font-size: 1.25rem;
+  line-height: 2.2;
+  letter-spacing: 0.01em;
+}
+
+/* Prose styling for chat responses */
+.chat-response p {
+  margin-bottom: 0.5rem;
+}
+
+.chat-response p:last-child {
+  margin-bottom: 0;
 }
