@@ -11,15 +11,15 @@ datasource db {
 model DocumentChunk {
   id            String   @id @default(cuid())
   content       String   @db.Text
-  contentArabic String?  @db.Text @map("content_arabic") // Texte arabe original
-  embedding     Unsupported("vector(768)")?  // pgvector embedding pour recherche sémantique (Gemini = 768)
-  embeddingJson Json?    @map("embedding_json") // Backup JSON pour compatibilité
+  contentArabic String?  @db.Text @map("content_arabic")
+  embedding     Unsupported("vector(768)")?
+  embeddingJson Json?    @map("embedding_json")
   source        String   // "coran", "hadith", "imam"
   reference     String   // Ex: "Sourate 2, Verset 255" ou "Hadith 42"
   grade         String?  // Pour hadiths: 'sahih', 'hasan', 'daif'
-  themes        String[] @default([]) // Catégorisation thématique
-  isnad         String?  @db.Text // Chaîne de transmission pour hadiths
-  metadata      Json?    // Infos supplémentaires (JSONB pour données riches)
+  themes        String[] @default([])
+  isnad         String?  @db.Text
+  metadata      Json?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt @default(now())
 
@@ -30,40 +30,31 @@ model DocumentChunk {
 }
 
 // ==================== STRUCTURE OPTIMISÉE HADITHS (FUTURE) ====================
-// Note: Table préparée pour import massif depuis sunnah.com API
-// Activation requiert pgvector sur la base de données
 
 model Hadith {
   id            String   @id @default(cuid())
-  
-  // Identifiants
+
   hadithNumber  Int?     @map("hadith_number")
   bookNumber    Int?     @map("book_number")
   chapterNumber Int?     @map("chapter_number")
-  
-  // Textes
+
   textArabic    String   @db.Text @map("text_arabic")
   textFrench    String?  @db.Text @map("text_french")
   textEnglish   String?  @db.Text @map("text_english")
-  
-  // Chaîne de transmission
+
   isnad         String?  @db.Text
-  narratorChain Json?    @map("narrator_chain") // [{name, tier}]
-  
-  // Classification
-  grade         String?  // 'sahih', 'hasan', 'daif', etc.
+  narratorChain Json?    @map("narrator_chain")
+
+  grade         String?
   gradedBy      String?  @map("graded_by")
-  
-  // Catégorisation
-  source        String   // 'bukhari', 'muslim', 'tirmidhi', etc.
+
+  source        String
   bookName      String?  @map("book_name")
   chapterName   String?  @map("chapter_name")
   themes        String[] @default([])
-  
-  // Métadonnées
+
   metadata      Json?
-  
-  // Horodatage
+
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -77,213 +68,30 @@ model Hadith {
 
 model QuranVerse {
   id                String   @id @default(cuid())
-  
-  // Références
+
   surahNumber       Int      @map("surah_number")
   verseNumber       Int      @map("verse_number")
   juzNumber         Int?     @map("juz_number")
   hizbNumber        Int?     @map("hizb_number")
   pageNumber        Int?     @map("page_number")
-  
-  // Textes
+
   textArabic        String   @db.Text @map("text_arabic")
   textFrench        String?  @db.Text @map("text_french")
   textTransliteration String? @db.Text @map("text_transliteration")
-  
-  // Métadonnées sourate
+
   surahNameArabic   String?  @map("surah_name_arabic")
   surahNameFrench   String?  @map("surah_name_french")
-  revelationType    String?  @map("revelation_type") // 'mecquoise' ou 'medinoise'
-  
-  // Catégorisation
+  revelationType    String?  @map("revelation_type")
+
   themes            String[] @default([])
   relatedVerses     Json?    @map("related_verses")
-  
-  // Métadonnées
+
   metadata          Json?
-  
-  // Horodatage
+
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   @@unique([surahNumber, verseNumber])
   @@index([surahNumber])
   @@map("quran_verses")
-}
-
-// ==================== SESSIONS MULTI-TOUR ====================
-
-model ChatSession {
-  id           String    @id @default(cuid())
-  status       String    @default("active") // active, escalated, in_progress, resolved, closed
-  turnCount    Int       @default(0)
-  topics       String[]  @default([])
-  lastSources  String[]  @default([])
-  metadata     Json?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  expiresAt    DateTime?
-  
-  // Champs escalade
-  userEmail       String?   @map("user_email") // Email de l'utilisateur (si fourni)
-  userIdentifier  String?   @map("user_identifier") // IP ou session ID
-  escalatedAt     DateTime? @map("escalated_at") // Date d'escalade
-  escalationReason String?  @db.Text @map("escalation_reason") // Raison de l'escalade
-  priority        String    @default("normal") // low, normal, high, urgent
-  assignedTo      String?   @map("assigned_to") // Admin assigné
-  
-  // Notes et suivi admin
-  adminNotes      AdminNote[]
-  
-  messages     ChatMessage[]
-  
-  @@index([status])
-  @@index([createdAt])
-  @@index([escalatedAt])
-  @@index([priority])
-  @@map("chat_sessions")
-}
-
-// Notes admin pour le suivi des escalades
-model AdminNote {
-  id          String   @id @default(cuid())
-  sessionId   String   @map("session_id")
-  content     String   @db.Text
-  action      String?  // "note", "status_change", "email_sent", "resolved"
-  createdBy   String   @default("admin") @map("created_by")
-  createdAt   DateTime @default(now())
-  
-  session     ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  
-  @@index([sessionId])
-  @@map("admin_notes")
-}
-
-model ChatMessage {
-  id         String   @id @default(cuid())
-  sessionId  String
-  role       String   // "user" ou "assistant"
-  content    String   @db.Text
-  intent     String?
-  confidence Float?
-  sources    Json?    // Sources citées dans la réponse
-  metadata   Json?
-  createdAt  DateTime @default(now())
-  
-  session    ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  
-  @@index([sessionId])
-  @@index([createdAt])
-  @@map("chat_messages")
-}
-
-// ==================== LOGGING & MÉTRIQUES ====================
-
-model SystemLog {
-  id        String   @id @default(cuid())
-  level     String   // debug, info, warn, error
-  category  String   // chat, session, search, escalate, ingest, admin, auth, system
-  message   String   @db.Text
-  metadata  Json?
-  sessionId String?
-  userId    String?
-  duration  Int?
-  createdAt DateTime @default(now())
-
-  @@index([level])
-  @@index([category])
-  @@index([createdAt])
-  @@map("system_logs")
-}
-
-model SystemMetric {
-  id        String   @id @default(cuid())
-  name      String
-  value     Float
-  tags      Json?
-  createdAt DateTime @default(now())
-
-  @@index([name])
-  @@index([createdAt])
-  @@map("system_metrics")
-}
-
-// ==================== SÉCURITÉ & RGPD ====================
-
-model ApiToken {
-  id          String    @id @default(cuid())
-  name        String
-  token       String    @unique
-  permissions String[]  @default(["read"])
-  expiresAt   DateTime?
-  lastUsedAt  DateTime?
-  createdAt   DateTime  @default(now())
-  isActive    Boolean   @default(true)
-
-  @@index([token])
-  @@map("api_tokens")
-}
-
-model GdprConsent {
-  id           String   @id @default(cuid())
-  sessionId    String   @unique
-  consentGiven Boolean  @default(false)
-  ipAddress    String?
-  userAgent    String?
-  purposes     String[] @default([])
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  @@index([sessionId])
-  @@map("gdpr_consents")
-}
-
-model DataExportRequest {
-  id          String   @id @default(cuid())
-  sessionId   String
-  email       String?
-  status      String   @default("pending") // pending, processing, completed, failed
-  requestType String   // export, delete
-  completedAt DateTime?
-  createdAt   DateTime @default(now())
-
-  @@index([sessionId])
-  @@index([status])
-  @@map("data_export_requests")
-}
-
-// ==================== QUOTAS & ABONNEMENTS ====================
-
-model UsageQuota {
-  id            String   @id @default(cuid())
-  identifier    String   @unique // IP, sessionId ou userId
-  plan          String   @default("free") // free, essential, premium, institutional
-  dailyQueries  Int      @default(0)
-  totalQueries  Int      @default(0)
-  lastQueryAt   DateTime?
-  quotaResetAt  DateTime @default(now())
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  @@index([identifier])
-  @@index([plan])
-  @@index([quotaResetAt])
-  @@map("usage_quotas")
-}
-
-model Subscription {
-  id            String    @id @default(cuid())
-  identifier    String    @unique
-  email         String?
-  plan          String    @default("free")
-  status        String    @default("active") // active, cancelled, expired
-  startDate     DateTime  @default(now())
-  endDate       DateTime?
-  billingCycle  String    @default("monthly") // monthly, yearly
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  @@index([identifier])
-  @@index([status])
-  @@map("subscriptions")
 }
