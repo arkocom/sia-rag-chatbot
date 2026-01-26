@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/db'
+import { db } from '@/lib/db'
+import { documents } from '@/lib/db/schema'
+import { eq, ilike, or, sql, desc } from 'drizzle-orm'
 
 export const dynamic = 'force-dynamic'
 
@@ -12,25 +14,20 @@ interface IngestDocument {
 
 /**
  * POST /api/ingest - Ingère un ou plusieurs documents
- * Body: { documents: IngestDocument[] }
  */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { documents } = body as { documents: IngestDocument[] }
-    
-    if (!documents || !Array.isArray(documents) || documents.length === 0) {
-      return NextResponse.json(
-        { error: 'documents requis (array non vide)' },
-        { status: 400 }
-      )
+    const { documents: docs } = body as { documents: IngestDocument[] }
+
+    if (!docs || !Array.isArray(docs) || docs.length === 0) {
+      return NextResponse.json({ error: 'documents requis (array non vide)' }, { status: 400 })
     }
-    
-    // Valider chaque document
+
     const validSources = ['coran', 'hadith', 'imam']
     const errors: string[] = []
-    
-    documents.forEach((doc, idx) => {
+
+    docs.forEach((doc, idx) => {
       if (!doc.content || doc.content.trim().length < 10) {
         errors.push(`Document ${idx}: content requis (min 10 caractères)`)
       }
@@ -41,164 +38,135 @@ export async function POST(request: NextRequest) {
         errors.push(`Document ${idx}: reference requise (min 3 caractères)`)
       }
     })
-    
+
     if (errors.length > 0) {
-      return NextResponse.json(
-        { error: 'Validation échouée', details: errors },
-        { status: 400 }
-      )
+      return NextResponse.json({ error: 'Validation échouée', details: errors }, { status: 400 })
     }
-    
-    // Insérer les documents
-    const results = await prisma.documentChunk.createMany({
-      data: documents.map(doc => ({
+
+    // TODO: récupérer le user_id depuis Supabase Auth quand l'auth sera en place
+    // Pour l'instant, on utilise un user_id par défaut
+    const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000000'
+
+    const inserted = await db.insert(documents).values(
+      docs.map(doc => ({
+        userId: DEFAULT_USER_ID,
         content: doc.content.trim(),
         source: doc.source,
         reference: doc.reference.trim(),
-        metadata: doc.metadata ? JSON.parse(JSON.stringify(doc.metadata)) : undefined,
-      })),
-      skipDuplicates: true
-    })
-    
+        metadata: doc.metadata ?? null,
+      }))
+    ).returning({ id: documents.id })
+
     return NextResponse.json({
       success: true,
-      message: `${results.count} document(s) ingéré(s)`,
-      ingested_count: results.count,
-      total_submitted: documents.length
+      message: `${inserted.length} document(s) ingéré(s)`,
+      ingested_count: inserted.length,
+      total_submitted: docs.length,
     })
-    
   } catch (error) {
     console.error('Erreur API ingest:', error)
-    return NextResponse.json(
-      { error: 'Erreur serveur lors de l\'ingestion' },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: "Erreur serveur lors de l'ingestion" }, { status: 500 })
   }
 }
 
 /**
- * DELETE /api/ingest?id=xxx - Supprime un document
- * DELETE /api/ingest?source=xxx - Supprime tous les documents d'une source
+ * DELETE /api/ingest?id=xxx ou ?source=xxx
  */
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
     const docId = searchParams.get('id')
     const source = searchParams.get('source')
-    
+
     if (docId) {
-      // Supprimer un document spécifique
-      await prisma.documentChunk.delete({
-        where: { id: docId }
-      })
-      
-      return NextResponse.json({
-        success: true,
-        message: 'Document supprimé',
-        deleted_id: docId
-      })
+      await db.delete(documents).where(eq(documents.id, docId))
+      return NextResponse.json({ success: true, message: 'Document supprimé', deleted_id: docId })
     }
-    
+
     if (source) {
-      // Supprimer tous les documents d'une source
       const validSources = ['coran', 'hadith', 'imam']
       if (!validSources.includes(source)) {
-        return NextResponse.json(
-          { error: 'Source invalide' },
-          { status: 400 }
-        )
+        return NextResponse.json({ error: 'Source invalide' }, { status: 400 })
       }
-      
-      const result = await prisma.documentChunk.deleteMany({
-        where: { source }
-      })
-      
+
+      const deleted = await db.delete(documents).where(eq(documents.source, source)).returning({ id: documents.id })
       return NextResponse.json({
         success: true,
-        message: `${result.count} document(s) supprimé(s) de la source ${source}`,
-        deleted_count: result.count
+        message: `${deleted.length} document(s) supprimé(s) de la source ${source}`,
+        deleted_count: deleted.length,
       })
     }
-    
-    return NextResponse.json(
-      { error: 'Paramètre id ou source requis' },
-      { status: 400 }
-    )
-    
+
+    return NextResponse.json({ error: 'Paramètre id ou source requis' }, { status: 400 })
   } catch (error) {
     console.error('Erreur DELETE ingest:', error)
-    return NextResponse.json(
-      { error: 'Document non trouvé ou erreur serveur' },
-      { status: 404 }
-    )
+    return NextResponse.json({ error: 'Document non trouvé ou erreur serveur' }, { status: 404 })
   }
 }
 
 /**
- * GET /api/ingest - Récupère la liste des documents
- * GET /api/ingest?source=xxx - Filtre par source
- * GET /api/ingest?search=xxx - Recherche dans le contenu
+ * GET /api/ingest - Liste les documents
  */
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
     const source = searchParams.get('source')
     const search = searchParams.get('search')
-    const page = parseInt(searchParams.get('page') || '1')
-    const limit = Math.min(parseInt(searchParams.get('limit') || '20'), 100)
-    
-    const where: any = {}
-    
-    if (source) {
-      where.source = source
-    }
-    
+    const page = parseInt(searchParams.get('page') ?? '1')
+    const limit = Math.min(parseInt(searchParams.get('limit') ?? '20'), 100)
+    const offset = (page - 1) * limit
+
+    // Construire les conditions
+    const conditions = []
+    if (source) conditions.push(eq(documents.source, source))
     if (search) {
-      where.OR = [
-        { content: { contains: search, mode: 'insensitive' } },
-        { reference: { contains: search, mode: 'insensitive' } }
-      ]
+      conditions.push(
+        or(
+          ilike(documents.content, `%${search}%`),
+          ilike(documents.reference, `%${search}%`)
+        )!
+      )
     }
-    
-    const [documents, total] = await Promise.all([
-      prisma.documentChunk.findMany({
-        where,
-        select: {
-          id: true,
-          source: true,
-          reference: true,
-          content: true,
-          createdAt: true
-        },
-        orderBy: { createdAt: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit
-      }),
-      prisma.documentChunk.count({ where })
+
+    const whereClause = conditions.length > 0
+      ? conditions.reduce((acc, cond) => sql`${acc} AND ${cond}`)
+      : undefined
+
+    const [docs, countResult] = await Promise.all([
+      db
+        .select({
+          id: documents.id,
+          source: documents.source,
+          reference: documents.reference,
+          content: documents.content,
+          createdAt: documents.createdAt,
+        })
+        .from(documents)
+        .where(whereClause)
+        .orderBy(desc(documents.createdAt))
+        .limit(limit)
+        .offset(offset),
+      db
+        .select({ count: sql<number>`count(*)` })
+        .from(documents)
+        .where(whereClause),
     ])
-    
+
+    const total = Number(countResult[0]?.count ?? 0)
+
     return NextResponse.json({
-      documents: documents.map(d => ({
+      documents: docs.map(d => ({
         id: d.id,
         source: d.source,
         reference: d.reference,
         excerpt: d.content.substring(0, 300) + (d.content.length > 300 ? '...' : ''),
         content_length: d.content.length,
-        created_at: d.createdAt
+        created_at: d.createdAt,
       })),
-      pagination: {
-        page,
-        limit,
-        total,
-        total_pages: Math.ceil(total / limit)
-      }
+      pagination: { page, limit, total, total_pages: Math.ceil(total / limit) },
     })
-    
   } catch (error) {
     console.error('Erreur GET ingest:', error)
-    return NextResponse.json(
-      { error: 'Erreur serveur' },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: 'Erreur serveur' }, { status: 500 })
   }
 }
