@@ -5,22 +5,18 @@ import {
   timestamp,
   varchar,
   integer,
-  real,
   jsonb,
   index,
-  uniqueIndex,
-  pgSchema,
 } from 'drizzle-orm/pg-core'
 import { sql } from 'drizzle-orm'
+import { customType } from 'drizzle-orm/pg-core'
 
 // ==================== CUSTOM TYPES ====================
 
 /**
  * Type pgvector personnalisé pour Drizzle.
- * Stocke des embeddings sous forme vector(1536).
+ * Stocke des embeddings sous forme vector(768).
  */
-import { customType } from 'drizzle-orm/pg-core'
-
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
     return 'vector(768)'
@@ -37,28 +33,30 @@ const vector = customType<{ data: number[]; driverData: string }>({
 })
 
 // ==================== DOCUMENTS ====================
+// Maps to existing `document_chunks` table (created by Prisma).
+// IDs are CUIDs (text), not UUIDs.
+// user_id will be added in a future migration when auth is implemented.
 
 export const documents = pgTable(
-  'documents',
+  'document_chunks',
   {
-    id: uuid('id').defaultRandom().primaryKey(),
-    userId: uuid('user_id').notNull().references(() => profiles.id, { onDelete: 'cascade' }),
+    id: text('id').primaryKey(),
     content: text('content').notNull(),
-    source: varchar('source', { length: 50 }).notNull(), // 'coran' | 'hadith' | 'imam' | 'custom'
-    reference: varchar('reference', { length: 500 }).notNull(),
+    source: text('source').notNull(), // 'coran' | 'hadith' | 'imam'
+    reference: text('reference').notNull(),
     metadata: jsonb('metadata').$type<Record<string, unknown>>(),
     embedding: vector('embedding'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    index('idx_documents_user_id').on(table.userId),
-    index('idx_documents_source').on(table.source),
-    index('idx_documents_created_at').on(table.createdAt),
+    index('document_chunks_source_idx').on(table.source),
+    index('document_chunks_created_at_idx').on(table.createdAt),
   ]
 )
 
 // ==================== PROFILES (extends Supabase Auth) ====================
+// Will be created when auth is implemented.
 
 export const profiles = pgTable('profiles', {
   id: uuid('id').primaryKey(), // matches auth.users.id
@@ -71,6 +69,7 @@ export const profiles = pgTable('profiles', {
 })
 
 // ==================== CONVERSATIONS ====================
+// Will be created when auth is implemented.
 
 export const conversations = pgTable(
   'conversations',
@@ -87,6 +86,7 @@ export const conversations = pgTable(
 )
 
 // ==================== MESSAGES ====================
+// Will be created when auth is implemented.
 
 export const messages = pgTable(
   'messages',

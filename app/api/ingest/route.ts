@@ -43,13 +43,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Validation échouée', details: errors }, { status: 400 })
     }
 
-    // TODO: récupérer le user_id depuis Supabase Auth quand l'auth sera en place
-    // Pour l'instant, on utilise un user_id par défaut
-    const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000000'
-
     const inserted = await db.insert(documents).values(
       docs.map(doc => ({
-        userId: DEFAULT_USER_ID,
+        id: crypto.randomUUID(),
         content: doc.content.trim(),
         source: doc.source,
         reference: doc.reference.trim(),

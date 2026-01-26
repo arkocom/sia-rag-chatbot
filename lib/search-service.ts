@@ -52,7 +52,7 @@ export async function searchFullText(
           to_tsvector('french', coalesce(content, '') || ' ' || coalesce(reference, '')),
           to_tsquery('french', ${searchTerms})
         ) as score
-      FROM documents
+      FROM document_chunks
       WHERE to_tsvector('french', coalesce(content, '') || ' ' || coalesce(reference, ''))
             @@ to_tsquery('french', ${searchTerms})
         ${sources && sources.length > 0 ? sql`AND source = ANY(${sources})` : sql``}
@@ -91,7 +91,7 @@ export async function searchVector(
         source,
         metadata,
         1 - (embedding <=> ${embeddingStr}::vector) as score
-      FROM documents
+      FROM document_chunks
       WHERE embedding IS NOT NULL
         AND 1 - (embedding <=> ${embeddingStr}::vector) > ${threshold}
         ${sources && sources.length > 0 ? sql`AND source = ANY(${sources})` : sql``}
@@ -169,7 +169,7 @@ async function fallbackSearch(
 
   const results = await db.execute(sql`
     SELECT id, content, reference, source, metadata, 0.5 as score
-    FROM documents
+    FROM document_chunks
     WHERE content ILIKE ${likePattern}
       ${sources && sources.length > 0 ? sql`AND source = ANY(${sources})` : sql``}
     LIMIT ${limit}
