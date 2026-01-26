@@ -53,21 +53,79 @@ function searchChunksByKeywords(chunks: ChunkRow[], keywords: string[]): (ChunkR
     .sort((a, b) => b.score - a.score)
 }
 
+/**
+ * Étape 1 : Gemini génère les termes de recherche en arabe et en français
+ * à partir de la question de l'utilisateur.
+ */
+async function generateSearchTerms(
+  question: string,
+  genAI: InstanceType<typeof import('@google/generative-ai').GoogleGenerativeAI>
+): Promise<string[]> {
+  const frenchKeywords = extractKeywords(question)
+
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
+    const result = await model.generateContent(
+      `Donne-moi les mots-clés de recherche pour trouver des passages coraniques, hadiths et textes islamiques sur ce sujet.
+
+Question : "${question}"
+
+Réponds UNIQUEMENT avec une liste de mots-clés séparés par des virgules, en incluant :
+- Les mots-clés en arabe (termes coraniques pertinents)
+- Les mots-clés en français
+
+Exemple pour "patience" : صبر,الصبر,صابرين,patience,endurant,épreuve
+
+Mots-clés :`
+    )
+    const terms = result.response.text()
+      .split(',')
+      .map(t => t.trim())
+      .filter(t => t.length > 1)
+
+    return [...new Set([...frenchKeywords, ...terms])]
+  } catch {
+    return frenchKeywords
+  }
+}
+
 async function selectRelevantChunks(
   userQuestion: string,
   allChunks: ChunkRow[],
-  limit: number = 8
+  limit: number = 8,
+  genAI: InstanceType<typeof import('@google/generative-ai').GoogleGenerativeAI>
 ) {
   const startTime = Date.now()
-  const keywords = extractKeywords(userQuestion)
-  const keywordResults = searchChunksByKeywords(allChunks, keywords)
 
+  // Étape 1 : Générer des termes de recherche bilingues (FR + AR)
+  const searchTerms = await generateSearchTerms(userQuestion, genAI)
+  const keywordResults = searchChunksByKeywords(allChunks, searchTerms)
+
+  // Étape 2 : Collecter les candidats par mots-clés
   const coranChunks = keywordResults.filter(c => c.source === 'coran').slice(0, 40)
   const hadithChunks = keywordResults.filter(c => c.source === 'hadith').slice(0, 20)
   const imamChunks = keywordResults.filter(c => c.source === 'imam').slice(0, 20)
 
   let candidateChunks: ChunkRow[] = [...coranChunks, ...hadithChunks, ...imamChunks]
 
+  // Étape 3 : Si peu de résultats par mots-clés, échantillonner la base
+  // pour que Gemini puisse sélectionner dans un pool plus large
+  if (candidateChunks.length < 30) {
+    const existingIds = new Set(candidateChunks.map(c => c.id))
+    const remaining = allChunks.filter(c => !existingIds.has(c.id))
+
+    // Échantillonner proportionnellement par source
+    const sampleCoran = remaining.filter(c => c.source === 'coran')
+      .sort(() => Math.random() - 0.5).slice(0, 40)
+    const sampleHadith = remaining.filter(c => c.source === 'hadith')
+      .sort(() => Math.random() - 0.5).slice(0, 15)
+    const sampleImam = remaining.filter(c => c.source === 'imam')
+      .sort(() => Math.random() - 0.5).slice(0, 15)
+
+    candidateChunks = [...candidateChunks, ...sampleCoran, ...sampleHadith, ...sampleImam]
+  }
+
+  // Déduplication
   const seen = new Set<string>()
   candidateChunks = candidateChunks.filter(chunk => {
     if (seen.has(chunk.id)) return false
@@ -75,11 +133,12 @@ async function selectRelevantChunks(
     return true
   }).slice(0, 80)
 
+  // Étape 4 : Gemini sélectionne les passages pertinents
   const chunksText = candidateChunks
     .map((chunk, idx) => `[${idx}] ${chunk.reference}: ${chunk.content.substring(0, 300)}`)
     .join('\n\n')
 
-  const selectionPrompt = `Tu es un expert en sources islamiques. Voici une liste de passages numérotés.
+  const selectionPrompt = `Tu es un expert en sources islamiques. Tu comprends l'arabe et le français.
 
 QUESTION DE L'UTILISATEUR : "${userQuestion}"
 
@@ -87,6 +146,7 @@ PASSAGES DISPONIBLES :
 ${chunksText}
 
 TÂCHE : Sélectionne TOUS les passages qui sont PERTINENTS pour répondre à cette question (jusqu'à ${limit} maximum).
+- Le contenu est souvent en arabe : lis et comprends le texte arabe pour juger de la pertinence
 - Inclus TOUT passage qui traite directement ou indirectement du sujet demandé
 - Ne rejette un passage que s'il est clairement hors-sujet
 - Diversifie les sources si possible (Coran, Hadiths, Imams)
@@ -96,10 +156,7 @@ Réponds UNIQUEMENT avec les numéros entre crochets, séparés par des virgules
 Numéros sélectionnés:`
 
   try {
-    const { GoogleGenerativeAI } = await import('@google/generative-ai')
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
-
     const result = await model.generateContent(selectionPrompt)
     const selection = result.response.text()
 
@@ -114,7 +171,6 @@ Numéros sélectionnés:`
       searchTime: Date.now() - startTime,
       totalSearched: allChunks.length,
       keywordMatchCount: keywordResults.length,
-      extractedKeywords: keywords,
     }
   } catch (error) {
     console.error('Erreur sélection Gemini:', error)
@@ -123,7 +179,6 @@ Numéros sélectionnés:`
       searchTime: Date.now() - startTime,
       totalSearched: allChunks.length,
       keywordMatchCount: keywordResults.length,
-      extractedKeywords: keywords,
     }
   }
 }
@@ -156,6 +211,9 @@ export async function POST(request: NextRequest) {
       })
       .from(documents)
 
+    const { GoogleGenerativeAI } = await import('@google/generative-ai')
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
+
     if (allChunks.length === 0) {
       const emptyResponse: ChatResponse = {
         response_text: "Je n'ai pas trouvé de passages dans les sources disponibles. La base de données semble vide.",
@@ -175,7 +233,7 @@ export async function POST(request: NextRequest) {
     }
 
     const { chunks: relevantChunks, totalSearched, keywordMatchCount } =
-      await selectRelevantChunks(userMessage, allChunks, 20)
+      await selectRelevantChunks(userMessage, allChunks, 20, genAI)
 
     if (relevantChunks.length === 0) {
       const noResultResponse: ChatResponse = {
@@ -250,8 +308,6 @@ N'ajoute RIEN qui ne vient pas des sources ci-dessus. RIEN.
 Si aucune source ci-dessus ne traite du sujet :
 "Les sources disponibles ne contiennent pas de passage traitant directement de ce sujet."`
 
-    const { GoogleGenerativeAI } = await import('@google/generative-ai')
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? '')
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.5-flash',
       generationConfig: { maxOutputTokens: 8000, temperature: 0.1 },
